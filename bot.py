@@ -1,19 +1,23 @@
 import sqlite3
 import random
 import asyncio
+import urllib.request
+import json as json_lib
 from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 
+# Твой токен бота
 API_TOKEN = '8841461685:AAEq6sl4NFTJpgbEe-wlnOt_unotiZyo8YA'
+
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 app = Flask(__name__)
 
-# Твой विशेष Telegram ID (или username), для которого разрешено много номеров
-ADMIN_OR_SPECIAL_USER = "Vapito" # Или сюда можно прописать твой numeric user_id, если знаешь его
+# Твой юзернейм, для которого разрешено много номеров
+SPECIAL_USERNAME = "Vapito"
 
 # Инициализация базы данных SQLite
 def init_db():
@@ -62,8 +66,8 @@ async def cmd_start(message: types.Message):
     conn = sqlite3.connect('raidgram.db')
     cursor = conn.cursor()
     
-    # Проверяем, есть ли номера у юзера (кроме Vapito)
-    if message.from_user.username != ADMIN_OR_SPECIAL_USER:
+    # Если пользователь не Vapito, проверяем есть ли у него уже номер
+    if username != SPECIAL_USERNAME:
         cursor.execute("SELECT phone FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
         if row:
@@ -93,12 +97,12 @@ async def process_back(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data in ['buy_888', 'get_free'])
 async def process_menu(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    username = message_username = callback.from_user.username or ""
+    username = callback.from_user.username or "no_username"
     
     conn = sqlite3.connect('raidgram.db')
     cursor = conn.cursor()
 
-    if callback.from_user.username != ADMIN_OR_SPECIAL_USER:
+    if username != SPECIAL_USERNAME:
         cursor.execute("SELECT phone FROM users WHERE user_id = ?", (user_id,))
         if cursor.fetchone():
             conn.close()
@@ -107,7 +111,7 @@ async def process_menu(callback: types.CallbackQuery):
 
     if callback.data == 'buy_888':
         phone = f"+888 {random.randint(100, 999)} {random.randint(10, 99)} {random.randint(10, 99)}"
-        cursor.execute("INSERT INTO users (user_id, username, phone) VALUES (?, ?, ?)", (user_id, username_safe(callback), phone))
+        cursor.execute("INSERT INTO users (user_id, username, phone) VALUES (?, ?, ?)", (user_id, username, phone))
         conn.commit()
         conn.close()
         await callback.message.edit_text(f"🎉 **Ваш анонимный номер (+888):**\n\n`{phone}`\n\nВведите его в приложении.", reply_markup=back_keyboard(), parse_mode="Markdown")
@@ -115,16 +119,14 @@ async def process_menu(callback: types.CallbackQuery):
         conn.close()
         await callback.message.edit_text("Выберите страну:", reply_markup=country_keyboard())
 
-def username_safe(callback):
-    return callback.from_user.username or "no_username"
-
 @dp.callback_query(lambda c: c.data.startswith('country_'))
 async def process_country(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+    username = callback.from_user.username or "no_username"
     conn = sqlite3.connect('raidgram.db')
     cursor = conn.cursor()
 
-    if callback.from_user.username != ADMIN_OR_SPECIAL_USER:
+    if username != SPECIAL_USERNAME:
         cursor.execute("SELECT phone FROM users WHERE user_id = ?", (user_id,))
         if cursor.fetchone():
             conn.close()
@@ -136,7 +138,7 @@ async def process_country(callback: types.CallbackQuery):
     else:
         phone = f"+7 {random.choice([900, 911, 922, 999])} {random.randint(100,999)} {random.randint(10,99)} {random.randint(10,99)}"
 
-    cursor.execute("INSERT INTO users (user_id, username, phone) VALUES (?, ?, ?)", (user_id, username_safe(callback), phone))
+    cursor.execute("INSERT INTO users (user_id, username, phone) VALUES (?, ?, ?)", (user_id, username, phone))
     conn.commit()
     conn.close()
 
@@ -147,8 +149,11 @@ async def process_country(callback: types.CallbackQuery):
 
 @app.route('/api/send_code', methods=['POST'])
 def api_send_code():
-    data = request.json
+    data = request.json or {}
     phone = data.get('phone')
+
+    if not phone:
+        return jsonify({'success': False, 'error': 'Номер не указан!'})
 
     conn = sqlite3.connect('raidgram.db')
     cursor = conn.cursor()
@@ -157,39 +162,50 @@ def api_send_code():
 
     if not row:
         conn.close()
-        return jsonify({'success': False, 'error': 'Номер не найден в базе бота!'})
+        return jsonify({'success': False, 'error': 'Номер не найден в базе бота! Сначала получите его в Telegram.'})
 
     user_id = row[0]
-    # Генерация честного 5-значного кода
+    # Генерируем честный 5-значный код
     code = str(random.randint(10000, 99999))
 
-    # Записываем код именно для этого конкретного телефона
+    # Сохраняем код в базу для этого номера
     cursor.execute("UPDATE users SET auth_code = ? WHERE phone = ?", (code, phone))
     conn.commit()
     conn.close()
 
-    # Отправляем код пользователю в Telegram
+    # Отправляем сообщение в Telegram напрямую через HTTP API Telegram (без лагов asyncio)
     try:
-        asyncio.run(bot.send_message(user_id, f"🔑 Ваш код подтверждения для входа в RaidGram: *{code}*", parse_mode="Markdown"))
+        url = f"https://api.telegram.org/bot{API_TOKEN}/sendMessage"
+        payload = {
+            'chat_id': user_id,
+            'text': f"🔑 Ваш код подтверждения для входа в RaidGram: *{code}*",
+            'parse_mode': 'Markdown'
+        }
+        data_bytes = json_lib.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data_bytes, headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req, timeout=5)
     except Exception as e:
-        return jsonify({'success': False, 'error': f'Не удалось отправить сообщение в Telegram: {str(e)}'})
+        return jsonify({'success': False, 'error': f'Ошибка отправки в Telegram: {str(e)}'})
 
     return jsonify({'success': True})
 
 @app.route('/api/verify_code', methods=['POST'])
 def api_verify_code():
-    data = request.json
+    data = request.json or {}
     phone = data.get('phone')
-    code = data.get('code')
+    code = str(data.get('code', '')).strip()
+
+    if not phone or not code:
+        return jsonify({'success': False, 'error': 'Заполните все поля!'})
 
     conn = sqlite3.connect('raidgram.db')
     cursor = conn.cursor()
-    # Сверяем код строго по базе для этого номера
     cursor.execute("SELECT auth_code FROM users WHERE phone = ?", (phone,))
     row = cursor.fetchone()
     
-    # Очищаем код после проверки (чтобы нельзя было использовать повторно старый код)
-    if row and row[0] and str(row[0]) == str(code):
+    # Строго проверяем совпадение кода из базы
+    if row and row[0] is not None and str(row[0]).strip() == code:
+        # Очищаем код после успешного входа, чтобы повторно его использовать нельзя было
         cursor.execute("UPDATE users SET auth_code = NULL WHERE phone = ?", (phone,))
         conn.commit()
         conn.close()
@@ -201,8 +217,10 @@ def api_verify_code():
 
 if __name__ == '__main__':
     import threading
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000)).start()
+    # Запускаем Flask в отдельном потоке
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000), daemon=True).start()
     
+    # Запуск бота на aiogram 3
     async def main():
         await dp.start_polling(bot)
 
